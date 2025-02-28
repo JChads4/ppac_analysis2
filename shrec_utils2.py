@@ -265,7 +265,7 @@ def extract_ppac_data(raw_df):
     """Extract PPAC detector data from raw dataframe."""
     try:
         # Define PPAC channels
-        cathode = raw_df[(raw_df['board'] == 9) & (raw_df['channel'] == 10)].copy()
+        cathode = raw_df[(raw_df['board'] == 9) & (raw_df['channel'] == 6)].copy()
         anodev = raw_df[(raw_df['board'] == 9) & (raw_df['channel'] == 12)].copy()
         anodeh = raw_df[(raw_df['board'] == 9) & (raw_df['channel'] == 8)].copy()
         

@@ -260,10 +260,6 @@ def memory_safe_sortcalSHREC(xdata, ydata, calibration_path, ecut=50, max_memory
     # Also prepare the t2 columns used in merging
     xdata['t2'] = np.round(xdata['timetag'] * 1e-12, 5)
     ydata['t2'] = np.round(ydata['timetag'] * 1e-12, 5)
-
-    # Also prepare the t2 columns used in merging
-    xdata['t3'] = np.round(xdata['timetag'] * 1e-12, 9)
-    ydata['t3'] = np.round(ydata['timetag'] * 1e-12, 9)
     
     # Apply calibration to all data at once
     log_message(f"Applying calibration to X data...", include_memory=True)
@@ -730,43 +726,224 @@ def process_file(csv_file, output_paths, shrec_map_path, calibration_path,
             'error': str(e)
         }
 
+def main():
+    """Main function to process all files with memory optimization."""
+    # Configuration variables
+    file_list_path = 'files_to_sort.txt'
+    data_folder = '../ppac_data/'
+    shrec_map_path = os.path.join(data_folder, 'r238_shrec_map.xlsx')
+    calibration_path = os.path.join(data_folder, 'r238_calibration_v0_copy-from-r237.txt')
+    output_folder = 'processed_data/'
+    energy_cut = 50
+    save_all_events = False
+    clear_outputs = True
+    chunksize = 20000  # More conservative initial chunk size
+    
+    # Memory limit settings
+    # By default, use 50% of available system memory to be ultra conservative
+    total_memory, available_memory = get_system_memory()
+    max_memory_mb = int(available_memory * 0.5)  # Use only 50% of available memory
+    # Uncomment and set a specific value to override
+    # max_memory_mb = 2000  # Limit to 2GB of RAM
+    
+    # Set up output paths
+    output_paths = get_output_paths(output_folder)
+    
+    # Clear existing output files if requested
+    if clear_outputs:
+        for path in output_paths.values():
+            if path != output_paths['temp'] and os.path.exists(path):
+                os.remove(path)
+                log_message(f"Removed existing file: {path}")
+    
+    # Initialize log file
+    log_message(f"Starting ultra memory-optimized SHREC data processing", output_paths['log'], include_memory=True)
+    log_message(f"Initial memory usage: {get_memory_usage():.1f} MB", output_paths['log'])
+    log_message(f"Memory limit set to: {max_memory_mb:.1f} MB (of {total_memory:.1f} MB total system memory)", 
+              output_paths['log'])
+    
+    # Load list of files to process
+    try:
+        csv_files = load_file_list(file_list_path)
+        log_message(f"Found {len(csv_files)} files to process", output_paths['log'])
+    except Exception as e:
+        log_message(f"Error loading file list: {str(e)}", output_paths['log'])
+        return
+    
+    # Process each file
+    total_events = 0
+    
+    for i, csv_file in enumerate(csv_files):
+        log_message(f"\nProcessing file {i+1}/{len(csv_files)}: {csv_file}", 
+                   output_paths['log'], include_memory=True)
+        
+        try:
+            # Force garbage collection before processing each file
+            gc.collect()
+            
+            # Prepare a checkpoint file to track processing status
+            checkpoint_file = os.path.join(output_paths['temp'], f"{os.path.basename(csv_file)}.checkpoint")
+            
+            # Check if this file was previously processed
+            if os.path.exists(checkpoint_file):
+                log_message(f"File {csv_file} was already processed (checkpoint found)", output_paths['log'])
+                
+                # Read the summary from the checkpoint
+                with open(checkpoint_file, 'r') as f:
+                    import json
+                    try:
+                        summary = json.load(f)
+                    except:
+                        summary = {'filename': os.path.basename(csv_file), 'total_events': 0}
+            else:
+                # Process this file
+                summary = process_file(
+                    csv_file, 
+                    output_paths,
+                    shrec_map_path,
+                    calibration_path,
+                    save_all_events=save_all_events,
+                    ecut=energy_cut,
+                    chunksize=chunksize,
+                    max_memory_mb=max_memory_mb
+                )
+                
+                # Save checkpoint to mark as processed
+                with open(checkpoint_file, 'w') as f:
+                    import json
+                    json.dump(summary, f)
+            
+            # Update statistics
+            if 'total_events' in summary:
+                total_events += summary['total_events']
+            
+            # Print progress
+            log_message(f"Progress: {i+1}/{len(csv_files)} files processed", output_paths['log'])
+            log_message(f"Running total: {total_events} events", output_paths['log'], include_memory=True)
+            
+            # Force garbage collection again
+            gc.collect()
+            
+        except MemoryLimitExceeded as e:
+            log_message(f"Memory limit exceeded while processing {csv_file}: {str(e)}", output_paths['log'])
+            log_message("Reducing chunk size and retrying with more aggressive memory management...", output_paths['log'])
+            
+            # Try again with a smaller chunk size
+            try:
+                # Force garbage collection
+                gc.collect()
+                
+                # Reduce chunk size to half
+                smaller_chunksize = max(500, chunksize // 2)
+                log_message(f"Retrying with smaller chunk size: {smaller_chunksize}", output_paths['log'])
+                
+                summary = process_file(
+                    csv_file, 
+                    output_paths,
+                    shrec_map_path,
+                    calibration_path,
+                    save_all_events=save_all_events,
+                    ecut=energy_cut,
+                    chunksize=smaller_chunksize,
+                    max_memory_mb=max_memory_mb
+                )
+                
+                # Save checkpoint to mark as processed
+                checkpoint_file = os.path.join(output_paths['temp'], f"{os.path.basename(csv_file)}.checkpoint")
+                with open(checkpoint_file, 'w') as f:
+                    json.dump(summary, f)
+                
+                # If successful, update the chunk size for future files
+                chunksize = smaller_chunksize
+                
+            except Exception as retry_e:
+                log_message(f"Failed retry for {csv_file}: {str(retry_e)}", output_paths['log'])
+            
+        except Exception as e:
+            log_message(f"Error processing file {csv_file}: {str(e)}", output_paths['log'])
+    
+    # Print final summary
+    log_message("\nProcessing complete!", output_paths['log'])
+    log_message(f"Total files processed: {len(csv_files)}", output_paths['log'])
+    log_message(f"Total events processed: {total_events}", output_paths['log'])
+    log_message(f"Final memory usage: {get_memory_usage():.1f} MB", output_paths['log'])
+    
+    # Try to read file size information
+    for name, path in output_paths.items():
+        if name != 'log' and name != 'temp' and os.path.exists(path):
+            try:
+                file_size_mb = os.path.getsize(path) / (1024 * 1024)
+                log_message(f"{name} file size: {file_size_mb:.1f} MB", output_paths['log'])
+            except:
+                pass
+
+if __name__ == "__main__":
+    # Set up global exception handler to avoid crashes
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        print(f"Uncaught exception: {exc_type.__name__}: {exc_value}")
+        import traceback
+        print("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+        
+        # Force process to exit cleanly without kernel killing it
+        sys.exit(1)
+    
+    sys.excepthook = handle_exception
+    
+    try:
+        main()
+    except Exception as e:
+        print(f"Critical error in main function: {str(e)}")
+        # Clean exit without kernel kill
+        sys.exit(1)
+
+# import multiprocessing as mp
+
+# # Add this wrapper function before main()
+# def process_file_wrapper(args):
+#     """Wrapper function to unpack arguments for process_file when using multiprocessing."""
+#     try:
+#         csv_file, output_paths, shrec_map_path, calibration_path, energy_cut, chunksize, max_memory_mb = args
+        
+#         # Call the existing process_file function with unpacked arguments
+#         return process_file(
+#             csv_file=csv_file,
+#             output_paths=output_paths,
+#             shrec_map_path=shrec_map_path,
+#             calibration_path=calibration_path,
+#             save_all_events=False,  # Default value
+#             ecut=energy_cut,
+#             chunksize=chunksize,
+#             max_memory_mb=max_memory_mb
+#         )
+#     except Exception as e:
+#         # Handle any exceptions in the child process
+#         import traceback
+#         return {
+#             'filename': os.path.basename(csv_file) if 'csv_file' in locals() else 'unknown',
+#             'error': str(e),
+#             'traceback': traceback.format_exc()
+#         }
+
 # def main():
-#     """Main function to process all files with memory optimization."""
-#     # Configuration variables
+#     # Your existing configuration and output path setup
 #     file_list_path = 'files_to_sort.txt'
 #     data_folder = '../ppac_data/'
 #     shrec_map_path = os.path.join(data_folder, 'r238_shrec_map.xlsx')
 #     calibration_path = os.path.join(data_folder, 'r238_calibration_v0_copy-from-r237.txt')
 #     output_folder = 'processed_data/'
 #     energy_cut = 50
-#     save_all_events = False
-#     clear_outputs = True
-#     chunksize = 20000  # More conservative initial chunk size
+#     chunksize = 5000  # Use a smaller chunk size for safer processing
     
-#     # Memory limit settings
-#     # By default, use 50% of available system memory to be ultra conservative
+#     # Memory limit settings (e.g., 60% of available system memory per process)
 #     total_memory, available_memory = get_system_memory()
-#     max_memory_mb = int(available_memory * 0.5)  # Use only 50% of available memory
-#     # Uncomment and set a specific value to override
-#     # max_memory_mb = 2000  # Limit to 2GB of RAM
+#     max_memory_mb = int(available_memory * 0.6)
     
-#     # Set up output paths
+#     # Ensure output directories exist
+#     os.makedirs(output_folder, exist_ok=True)
+#     os.makedirs(os.path.join(output_folder, 'temp'), exist_ok=True)
+    
+#     # Set up output paths and load file list
 #     output_paths = get_output_paths(output_folder)
-    
-#     # Clear existing output files if requested
-#     if clear_outputs:
-#         for path in output_paths.values():
-#             if path != output_paths['temp'] and os.path.exists(path):
-#                 os.remove(path)
-#                 log_message(f"Removed existing file: {path}")
-    
-#     # Initialize log file
-#     log_message(f"Starting ultra memory-optimized SHREC data processing", output_paths['log'], include_memory=True)
-#     log_message(f"Initial memory usage: {get_memory_usage():.1f} MB", output_paths['log'])
-#     log_message(f"Memory limit set to: {max_memory_mb:.1f} MB (of {total_memory:.1f} MB total system memory)", 
-#               output_paths['log'])
-    
-#     # Load list of files to process
 #     try:
 #         csv_files = load_file_list(file_list_path)
 #         log_message(f"Found {len(csv_files)} files to process", output_paths['log'])
@@ -774,165 +951,36 @@ def process_file(csv_file, output_paths, shrec_map_path, calibration_path,
 #         log_message(f"Error loading file list: {str(e)}", output_paths['log'])
 #         return
     
-#     # Process each file
-#     total_events = 0
+#     # Create a list of arguments for each file
+#     tasks = [
+#         (csv_file, output_paths, shrec_map_path, calibration_path, energy_cut, chunksize, max_memory_mb)
+#         for csv_file in csv_files
+#     ]
     
-#     for i, csv_file in enumerate(csv_files):
-#         log_message(f"\nProcessing file {i+1}/{len(csv_files)}: {csv_file}", 
-#                    output_paths['log'], include_memory=True)
-        
-#         try:
-#             # Force garbage collection before processing each file
-#             gc.collect()
-            
-#             # Prepare a checkpoint file to track processing status
-#             checkpoint_file = os.path.join(output_paths['temp'], f"{os.path.basename(csv_file)}.checkpoint")
-            
-#             # Check if this file was previously processed
-#             if os.path.exists(checkpoint_file):
-#                 log_message(f"File {csv_file} was already processed (checkpoint found)", output_paths['log'])
-                
-#                 # Read the summary from the checkpoint
-#                 with open(checkpoint_file, 'r') as f:
-#                     import json
-#                     try:
-#                         summary = json.load(f)
-#                     except:
-#                         summary = {'filename': os.path.basename(csv_file), 'total_events': 0}
-#             else:
-#                 # Process this file
-#                 summary = process_file(
-#                     csv_file, 
-#                     output_paths,
-#                     shrec_map_path,
-#                     calibration_path,
-#                     save_all_events=save_all_events,
-#                     ecut=energy_cut,
-#                     chunksize=chunksize,
-#                     max_memory_mb=max_memory_mb
-#                 )
-                
-#                 # Save checkpoint to mark as processed
-#                 with open(checkpoint_file, 'w') as f:
-#                     import json
-#                     json.dump(summary, f)
-            
-#             # Update statistics
-#             if 'total_events' in summary:
-#                 total_events += summary['total_events']
-            
-#             # Print progress
-#             log_message(f"Progress: {i+1}/{len(csv_files)} files processed", output_paths['log'])
-#             log_message(f"Running total: {total_events} events", output_paths['log'], include_memory=True)
-            
-#             # Force garbage collection again
-#             gc.collect()
-            
-#         except MemoryLimitExceeded as e:
-#             log_message(f"Memory limit exceeded while processing {csv_file}: {str(e)}", output_paths['log'])
-#             log_message("Reducing chunk size and retrying with more aggressive memory management...", output_paths['log'])
-            
-#             # Try again with a smaller chunk size
-#             try:
-#                 # Force garbage collection
-#                 gc.collect()
-                
-#                 # Reduce chunk size to half
-#                 smaller_chunksize = max(500, chunksize // 2)
-#                 log_message(f"Retrying with smaller chunk size: {smaller_chunksize}", output_paths['log'])
-                
-#                 summary = process_file(
-#                     csv_file, 
-#                     output_paths,
-#                     shrec_map_path,
-#                     calibration_path,
-#                     save_all_events=save_all_events,
-#                     ecut=energy_cut,
-#                     chunksize=smaller_chunksize,
-#                     max_memory_mb=max_memory_mb
-#                 )
-                
-#                 # Save checkpoint to mark as processed
-#                 checkpoint_file = os.path.join(output_paths['temp'], f"{os.path.basename(csv_file)}.checkpoint")
-#                 with open(checkpoint_file, 'w') as f:
-#                     json.dump(summary, f)
-                
-#                 # If successful, update the chunk size for future files
-#                 chunksize = smaller_chunksize
-                
-#             except Exception as retry_e:
-#                 log_message(f"Failed retry for {csv_file}: {str(retry_e)}", output_paths['log'])
-            
-#         except Exception as e:
-#             log_message(f"Error processing file {csv_file}: {str(e)}", output_paths['log'])
+#     # Use a multiprocessing Pool
+#     # To be extra cautious with memory, using processes=1 to run one file at a time
+#     log_message(f"Starting processing with multiprocessing (1 process at a time)", output_paths['log'])
+#     log_message(f"Memory limit per process: {max_memory_mb}MB", output_paths['log'])
+    
+#     with mp.Pool(processes=1) as pool:
+#         summaries = pool.map(process_file_wrapper, tasks)
+    
+#     # Process the collected summaries
+#     total_events = 0
+#     for summary in summaries:
+#         if 'error' in summary:
+#             log_message(f"Error processing {summary.get('filename', 'unknown')}: {summary['error']}", 
+#                        output_paths['log'])
+#         elif 'total_events' in summary:
+#             total_events += summary['total_events']
     
 #     # Print final summary
 #     log_message("\nProcessing complete!", output_paths['log'])
 #     log_message(f"Total files processed: {len(csv_files)}", output_paths['log'])
 #     log_message(f"Total events processed: {total_events}", output_paths['log'])
-#     log_message(f"Final memory usage: {get_memory_usage():.1f} MB", output_paths['log'])
     
-#     # Try to read file size information
-#     for name, path in output_paths.items():
-#         if name != 'log' and name != 'temp' and os.path.exists(path):
-#             try:
-#                 file_size_mb = os.path.getsize(path) / (1024 * 1024)
-#                 log_message(f"{name} file size: {file_size_mb:.1f} MB", output_paths['log'])
-#             except:
-#                 pass
-
 # if __name__ == "__main__":
-#     # Set up global exception handler to avoid crashes
-#     def handle_exception(exc_type, exc_value, exc_traceback):
-#         print(f"Uncaught exception: {exc_type.__name__}: {exc_value}")
-#         import traceback
-#         print("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
-        
-#         # Force process to exit cleanly without kernel killing it
-#         sys.exit(1)
-    
-#     sys.excepthook = handle_exception
-    
-#     try:
-#         main()
-#     except Exception as e:
-#         print(f"Critical error in main function: {str(e)}")
-#         # Clean exit without kernel kill
-#         sys.exit(1)
-
-def main():
-    # Your existing configuration and output path setup
-    file_list_path = 'files_to_sort.txt'
-    data_folder = '../ppac_data/'
-    shrec_map_path = os.path.join(data_folder, 'r238_shrec_map.xlsx')
-    calibration_path = os.path.join(data_folder, 'r238_calibration_v0_copy-from-r237.txt')
-    output_folder = 'processed_data/'
-    energy_cut = 50
-    chunksize = 20000  # or your preferred starting value
-    
-    # Memory limit settings (e.g., 50% of available system memory)
-    total_memory, available_memory = get_system_memory()
-    max_memory_mb = int(available_memory * 0.5)
-    
-    # Set up output paths and load file list
-    output_paths = get_output_paths(output_folder)
-    csv_files = load_file_list(file_list_path)
-    
-    # Create a list of arguments for each file
-    tasks = [
-        (csv_file, output_paths, shrec_map_path, calibration_path, energy_cut, chunksize, max_memory_mb)
-        for csv_file in csv_files
-    ]
-    
-    # Use a multiprocessing Pool
-    # To be extra cautious with memory, you can use processes=1 to run one file at a time,
-    # or increase this number if your system has enough RAM.
-    with mp.Pool(processes=1) as pool:
-        summaries = pool.map(process_file_wrapper, tasks)
-    
-    # Optionally, process the collected summaries
-    for summary in summaries:
-        print(summary)
-    
-if __name__ == "__main__":
-    main()
+#     # Force process to start fresh with released memory
+#     if mp.get_start_method(allow_none=True) != 'spawn':
+#         mp.set_start_method('spawn')
+#     main()
