@@ -346,7 +346,7 @@ def memory_safe_sortcalSHREC(xdata, ydata, calibration_path, ecut=50, max_memory
         ]
         
         # Keep only relevant columns
-        dfxy = dfxy[['t','x','y','xstripE','ystripE','tagx','tagy','nfile']]
+        dfxy = dfxy[['t','x','y','xstripE','ystripE','tagx','tagy','nfile', 'xboard', 'yboard']]
         
         # Time difference cut
         dfxy['tdelta'] = dfxy['tagx'] - dfxy['tagy']
