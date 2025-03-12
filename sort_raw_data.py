@@ -635,7 +635,7 @@ def process_file(csv_file, output_paths, shrec_map_path, calibration_path, save_
 def main():
     """Main function to process all files."""
     # Configuration variables (modify these as needed)
-    file_list_path = 'files_to_sort.txt'  # Path to file containing list of CSV files
+    file_list_path = 'long_run_4mbar_500V.txt'  # Path to file containing list of CSV files
     data_folder = '../ppac_data/'
     shrec_map_path = os.path.join(data_folder, 'r238_shrec_map.xlsx')
     calibration_path = os.path.join(data_folder, 'r238_calibration_v0_copy-from-r237.txt')
